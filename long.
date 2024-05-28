@@ -1,0 +1,67 @@
+from pyspark.sql import SparkSession
+from pyspark.sql.functions import col, when, lit
+
+# Initialize Spark session
+spark = SparkSession.builder \
+    .appName("EntityDataProcessing") \
+    .config("spark.some.config.option", "some-value") \
+    .getOrCreate()
+
+# Define schema for the input file
+schema = "F007-COD-PROD STRING, F007-DEBTBAL DOUBLE, F007-AMT-CAP DOUBLE, F007-AMT-ITR DOUBLE, F007-AMT-COM DOUBLE, F007-AMT-AVA1 DOUBLE"
+
+# Read the input file
+input_file_path = "path/to/input/file"
+df = spark.read.csv(input_file_path, schema=schema, sep="|")
+
+# Ensure each record is exactly 750 characters long
+df = df.withColumn("record_length", lit(750))
+
+# Define mapping rules for product codes
+product_code_mapping = {
+    "F007-COD-PROD": {
+        "CA-DEPOSIT1": "Deposit Type 1",
+        "CA-DEPOSIT2": "Deposit Type 2",
+        "CA-DEPOSIT3": "Deposit Type 3",
+        "CA-LOAN": "Loan Type"
+    }
+}
+
+# Map product codes to specific values
+df = df.withColumn("Product_Type", 
+                   when(col("F007-COD-PROD") == "CA-DEPOSIT1", lit("Deposit Type 1"))
+                   .when(col("F007-COD-PROD") == "CA-DEPOSIT2", lit("Deposit Type 2"))
+                   .when(col("F007-COD-PROD") == "CA-DEPOSIT3", lit("Deposit Type 3"))
+                   .when(col("F007-COD-PROD") == "CA-LOAN", lit("Loan Type"))
+                   .otherwise(lit("Unknown")))
+
+# Perform computations for the available amount based on other fields
+df = df.withColumn("F007-AMT-AVA1", 
+                   when(col("F007-COD-PROD").isin("CA-DEPOSIT1", "CA-DEPOSIT2", "CA-DEPOSIT3"), 
+                        col("F007-AMT-CAP") - col("F007-DEBTBAL") + col("F007-AMT-ITR") - col("F007-AMT-COM"))
+                   .when(col("F007-COD-PROD") == "CA-LOAN", 
+                        col("F007-AMT-CAP") - col("F007-DEBTBAL") - col("F007-AMT-COM"))
+                   .otherwise(lit(0.0)))
+
+# Calculate return percentage based on certain conditions
+df = df.withColumn("Return_Percentage", 
+                   when(col("F007-COD-PROD") == "CA-LOAN", 
+                        (col("F007-AMT-AVA1") / col("F007-AMT-CAP")) * 100)
+                   .otherwise(
+                        (col("F007-AMT-AVA1") / (col("F007-AMT-CAP") + col("F007-AMT-ITR"))) * 100))
+
+# Initialize the database to handle program failures
+# Assuming a JDBC connection to a database
+db_url = "jdbc:your_database_url"
+db_properties = {
+    "user": "your_username",
+    "password": "your_password",
+    "driver": "your_database_driver"
+}
+
+# Write the processed data to the database
+output_table = "processed_entity_data"
+df.write.jdbc(url=db_url, table=output_table, mode="overwrite", properties=db_properties)
+
+# Stop the Spark session
+spark.stop()
